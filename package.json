@@ -1,0 +1,12 @@
+{
+  "name": "stash-scene-score-advisor-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "build": "python3 build_site.py"
+  },
+  "devDependencies": {
+    "playwright": "1.55.1"
+  }
+}
