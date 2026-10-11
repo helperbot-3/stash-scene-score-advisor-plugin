@@ -4,19 +4,19 @@ A standalone Stash plugin that learns how scene tags relate to your ratings and 
 
 ## Install through Stash
 
-**Publication status: local implementation and tests are complete; a live plugin source has not yet been published or verified.** The local demo does not mean the plugin is available in Stash's source manager.
+**Published:** source index and package availability, SHA-256, and version verified on 2026-10-11.
 
 Repository: https://github.com/helperbot-3/stash-scene-score-advisor-plugin
 
-Source URL reserved for the deployment (not yet verified live):
+Add this source URL in Stash:
 
 ```text
 https://helperbot-3.github.io/stash-scene-score-advisor-plugin/main/index.yml
 ```
 
-This plugin follows the same installation and update workflow as Marker Compilations and Library Triage. After publishing the source through GitHub Pages:
+This plugin follows the same installation and update workflow as Marker Compilations and Library Triage. The source is published through GitHub Pages:
 
-1. Add the **verified published source URL** ending in `/main/index.yml` under **Settings → Plugins → Available Plugins → Sources**.
+1. Add the source URL above under **Settings → Plugins → Available Plugins → Sources**.
 2. Refresh available plugins, install **Scene Score Advisor**, and refresh the browser.
 3. Open **Score Advisor** in the main navigation (also available under **Settings → Tasks**), or navigate to `/scene-score-advisor` on your Stash server.
 4. Review **Tag weights** and ignore any tags that reveal a scene's existing rating. Common rating-derived names are excluded automatically; arbitrary names cannot be detected reliably.
@@ -68,4 +68,4 @@ License: AGPL-3.0; see LICENCE.
 
 ## Publishing
 
-The included `.github/workflows/deploy.yml` builds `_site/main` and deploys `_site` to GitHub Pages from `main` (or manual dispatch). Enable GitHub Pages with GitHub Actions in the actual repository. After deployment, verify the live index, package availability, version/date, and checksum, then replace the pending publication status above with the verified source URL. See the parent workspace `AGENTS.md` for the established delivery workflow.
+The included `.github/workflows/deploy.yml` builds `_site/main` and deploys `_site` to GitHub Pages from `main` (or manual dispatch). Enable GitHub Pages with GitHub Actions in the actual repository. After deployment, verify the live index, package availability, version/date, and checksum, and keep the installation URL above current. See the parent workspace `AGENTS.md` for the established delivery workflow.
