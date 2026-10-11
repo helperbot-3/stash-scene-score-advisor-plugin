@@ -2,7 +2,7 @@ name: Publish Stash plugin source
 on:
   push:
     branches: [main]
-    paths: ['plugins/**', 'build_site.py', '.github/workflows/deploy.yml']
+    paths: ['plugins/**', 'README.md', 'LICENCE', 'build_site.py', '.github/workflows/deploy.yml']
   workflow_dispatch:
 permissions:
   contents: read
