@@ -56,3 +56,30 @@ test('persisted state survives round trip and rejects bad numbers or versions',a
   assert.throws(()=>M.validateState({...state,version:2}));
   assert.throws(()=>M.validateState({...state,rules:{x:{weight:'20'}}}));
 });
+test('compilation status labels never enter learning or predictions, including custom IDs',async()=>{
+  const scenes=samples().map(s=>({...s,tags:[...s.tags,{id:'meta1',name:'Screened: Project / label'},{id:'meta2',name:'Absent: Project / label'},{id:'meta3',name:'Marker Compilations · Rendered'},{id:'custom',name:'My custom done label'}]}));
+  const state={rules:{custom:{weight:100}},metaIds:['custom']};
+  const rules=M.effectiveRules(state),model=await M.train(scenes,rules);
+  assert.ok(model.tags.every(t=>!t.id.startsWith('meta')&&t.id!=='custom'));
+  assert.ok(M.catalog(scenes,state.metaIds).find(t=>t.id==='custom').blocked);
+  const oldModel={baseline:60,tags:[{id:'meta1',weight:40,count:100},{id:'custom',weight:40,count:100}]};
+  assert.equal(M.predict({tags:[{id:'meta1',name:'Screened: Project / label'},{id:'custom',name:'My custom done label'}]},oldModel,rules).score,60);
+});
+test('accept follows learning and reopens after substantial change or sign reversal',()=>{
+  const rule=M.decisionRule({},'accept',10);
+  assert.equal(M.reviewStatus(rule,12),'accepted');
+  assert.equal(M.reviewStatus(rule,16),'changed');
+  assert.equal(M.reviewStatus(M.decisionRule({},'accept',1),-1),'changed');
+  assert.equal(rule.weight,null);
+});
+test('correction reverses direction, survives learning, and skip preserves its contribution',async()=>{
+  const rule=M.decisionRule({},'correct',-10,20);
+  assert.equal(M.reviewStatus(rule,-50),'corrected');
+  const rules={negative:rule},model=await M.train(samples(),rules);
+  assert.equal(M.predict({tags:[{id:'negative',name:'Negative'}]},model,rules).contributions[0].value,20);
+  const skipped=M.decisionRule(rule,'skip');
+  assert.equal(M.reviewStatus(skipped),'skipped');assert.equal(skipped.weight,20);
+  assert.equal(M.decisionRule(rule,'ignore').ignore,true);
+  assert.deepEqual(M.decisionRule(rule,'reset'),{});
+  assert.throws(()=>M.decisionRule({},'correct',0,101));
+});

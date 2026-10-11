@@ -36,7 +36,27 @@ Requires a Stash version supporting the plugin UI API, `configuration.plugins`, 
 - Sorts scene suggestions and searches scenes/tags, with 50 rows per page.
 - Stores the model and overrides on the Stash server in this plugin's configuration, shared across browsers.
 
-**The plugin never writes scene ratings, scene tags, or scene custom fields.** Suggestions are calculated on demand from the model and scene tags. They are sortable within the advisor; they are not native Stash rating filters or persisted custom fields. Plugin configuration changes are the only mutations used.
+**The plugin never writes scene ratings, scene tags, or scene custom fields.** Suggestions are calculated on demand from the model and scene tags. They are sortable within the advisor; they are not native Stash rating filters or persisted custom fields. Only advisor plugin settings are written. The optional compilation metadata lookup uses Stash’s `runPluginOperation` mutation with the read-only `screening_list` action.
+
+## Review labels (0.2.0)
+
+Open **Review labels** after learning. The queue starts with the largest absolute learned effects and hides automatically excluded metadata labels. Search and switch between Needs review, Skipped for now, Reviewed, or All eligible labels.
+
+- **Accept** uses the learned contribution and marks it reviewed; it does not freeze a weight. A later change of at least 0.25 stars, or a direction reversal spanning at least 0.10 stars, returns the label for review.
+- **Ignore** removes the label from predictions and future training. Retrain to refit the other weights and starting score.
+- **Score lower / Score higher** opens a slider and exact stars input. Preview the contribution, cross zero to reverse direction, then **Save correction and next**. The correction replaces the learned weight and survives retraining.
+- **Skip for now** defers the review while preserving the current scoring rule.
+- **Reset decision** restores unreviewed, learned behavior. **Undo last decision** restores the previous rule; the last 30 review decisions are stored across reloads.
+
+Review actions save automatically and advance only after successful storage. The ordinary Tag weights table still uses Save changes. A few high- and low-rated examples help explain each label; they illustrate the evidence rather than isolate its causal effect.
+
+The visual effect bar uses the same −1 to +1 star scale for every label, with zero at the center. Larger contributions reach the edge and show an overflow note and their exact value. A 3.0-star example previews the result, clipped to 1–5. Qualitative effect labels use absolute movement: very small below 0.10 stars, small below 0.25, moderate below 0.50, large below 1.00, and very large above. These are display conventions, not statistical confidence levels.
+
+### Automatic compilation metadata exclusions
+
+`Screened: …`, `Absent: …`, and `Marker Compilations · …` are excluded from training, predictions, and the review queue. The dashboard also reads the enabled Marker Compilations plugin's `screening_list` operation to discover configured screened/absent tag IDs, covering renamed/custom status labels. Known IDs are retained in advisor settings when decisions or training are saved. Failure to read custom metadata displays a warning; default name exclusions and previously saved IDs remain active. Content marker tags are not automatically excluded.
+
+After upgrading from 0.1.0, reload the library and **Learn from my ratings** once to remove metadata influence from the saved model's starting score and weights. Existing overrides are preserved, but automatic exclusions take precedence.
 
 ## Learning and quality
 
@@ -62,7 +82,7 @@ The dashboard fetches scene metadata in batches of 500 and holds it in browser m
 - `npm test` — regression, validation, prediction, storage validation, and safety tests.
 - `npm run build` — creates the installable ZIP and Stash source index in `_site/main`.
 
-For browser integration, launch a **separate disposable Stash** on `127.0.0.1:19998` with this repository's `plugins` directory. Run `python3 tests/seed-demo.py` once on its empty library, then `node tests/browser.cjs` (Chrome required). The script checks learning, server persistence, manual weights, scene integration, ignored tags, responsive layout, and absence of scene-rating writes. All screenshots and test data belong in ignored `.test-runtime/`.
+For browser integration, launch a **separate disposable Stash** on `127.0.0.1:19998` with this repository's `plugins` directory. Run `python3 tests/seed-demo.py` once on its empty library, then `node tests/browser.cjs` and `node tests/review-browser.cjs` (Chrome required). The script checks learning, server persistence, manual weights, scene integration, ignored tags, responsive layout, and absence of scene-rating writes. All screenshots and test data belong in ignored `.test-runtime/`.
 
 License: AGPL-3.0; see LICENCE.
 

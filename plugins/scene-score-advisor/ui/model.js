@@ -3,13 +3,15 @@
   const clamp = n => Math.max(20, Math.min(100, n));
   const rated = s => Number.isFinite(s.rating100) && s.rating100 > 0 && s.rating100 <= 100;
   const ids = s => [...new Set((s.tags || []).map(t => String(t.id)))];
-  const excluded = name => /^(?:scene[\s/_-]*)?(?:rated|rating|score)[\s:/_-]*\d+(?:\.\d+)?(?:\s*(?:stars?|\/\s*(?:5|100)))?$/i.test(name) || /^suggested[\s/_-]*(?:score|rating)/i.test(name);
+  const metaName = name => /^(?:Screened|Absent):\s*/i.test(name) || /^Marker Compilations\s*[·:]/i.test(name);
+  const excluded = name => metaName(name) || /^(?:scene[\s/_-]*)?(?:rated|rating|score)[\s:/_-]*\d+(?:\.\d+)?(?:\s*(?:stars?|\/\s*(?:5|100)))?$/i.test(name) || /^suggested[\s/_-]*(?:score|rating)/i.test(name);
   const pause = () => new Promise(resolve => setTimeout(resolve, 0));
-  function catalog(scenes) {
+  function catalog(scenes, metaIds = []) {
+    const meta = new Set(metaIds);
     const tags = new Map();
     scenes.forEach(s => (s.tags || []).forEach(t => {
       const key = String(t.id);
-      if (!tags.has(key)) tags.set(key, {id:key, name:t.name, count:0, blocked:excluded(t.name)});
+      if (!tags.has(key)) tags.set(key, {id:key, name:t.name, count:0, blocked:excluded(t.name)||meta.has(key), reason:metaName(t.name)||meta.has(key)?'Compilation status label':'Rating-derived name'});
     }));
     scenes.filter(rated).forEach(s => ids(s).forEach(id => { tags.get(id).count++; }));
     return [...tags.values()].sort((a,b) => a.name.localeCompare(b.name));
@@ -90,21 +92,49 @@
     }
     const fitted = await fit(rows,ignored);
     return {...fitted, version:1, trainedAt:new Date().toISOString(), ratedCount:rows.length, validation,
-      ignored:Object.keys(ignored).sort(), fingerprint:fingerprint(scenes)};
+      exclusionRevision:2, ignored:Object.keys(ignored).sort(), fingerprint:fingerprint(scenes)};
   }
   function fingerprint(scenes) {
     return hash(JSON.stringify(scenes.filter(rated).map(s=>[String(s.id),s.rating100,(s.tags||[]).map(t=>[String(t.id),t.name]).sort((a,b)=>a[0].localeCompare(b[0]))]).sort((a,b)=>a[0].localeCompare(b[0]))));
+  }
+  function effectiveRules(state) {
+    const rules={...state.rules};
+    for (const id of state.metaIds || []) rules[id]={...rules[id],ignore:true};
+    return rules;
+  }
+  function reviewStatus(rule = {}, weight = 0) {
+    if (rule.review==='skipped') return 'skipped';
+    if (rule.ignore) return 'ignored';
+    if (Number.isFinite(rule.weight)) return 'corrected';
+    if (rule.review==='accepted' && Number.isFinite(rule.acceptedWeight)) {
+      const changed=Math.abs(weight-rule.acceptedWeight)>=5 || (weight*rule.acceptedWeight<0 && Math.abs(weight-rule.acceptedWeight)>=2);
+      return changed?'changed':'accepted';
+    }
+    return 'unreviewed';
+  }
+  function decisionRule(rule, decision, learnedWeight = 0, correction) {
+    const next={...rule,reviewedAt:new Date().toISOString()};
+    if (decision==='accept') return {...next,ignore:false,weight:null,review:'accepted',acceptedWeight:learnedWeight};
+    if (decision==='ignore') return {...next,ignore:true,review:'ignored'};
+    if (decision==='skip') return {...next,review:'skipped'};
+    if (decision==='correct') {
+      if (!Number.isFinite(correction) || Math.abs(correction)>100) throw new Error('Use a contribution between −5 and +5 stars.');
+      return {...next,ignore:false,weight:correction,review:'corrected'};
+    }
+    if (decision==='reset') return {};
+    throw new Error('Unknown review decision.');
   }
   function validateState(state) {
     if (!state || state.version!==1 || !state.rules || typeof state.rules!=='object' || Array.isArray(state.rules)) throw new Error('Unsupported saved advisor settings.');
     Object.values(state.rules).forEach(r=>{
       if (!r || (r.weight!=null && (!Number.isFinite(r.weight) || Math.abs(r.weight)>100)) || (r.ignore!=null && typeof r.ignore!=='boolean')) throw new Error('Invalid saved tag rule.');
     });
+    if (state.metaIds && (!Array.isArray(state.metaIds) || !state.metaIds.every(id=>typeof id==='string'))) throw new Error('Invalid automatic exclusions.');
     const m=state.model;
     if (m && (m.version!==1 || !Number.isFinite(m.baseline) || !Array.isArray(m.tags) || !m.tags.every(t=>typeof t.id==='string' && Number.isFinite(t.weight) && Number.isFinite(t.count)))) throw new Error('Invalid saved model.');
     return state;
   }
-  const api = {clamp,rated,excluded,catalog,fit,createPredictor,predict,train,fingerprint,validateState};
+  const api = {effectiveRules,reviewStatus,decisionRule,metaName,clamp,rated,excluded,catalog,fit,createPredictor,predict,train,fingerprint,validateState};
   if (typeof module!=='undefined' && module.exports) module.exports=api;
   else root.SceneScoreAdvisorModel=api;
 })(typeof window!=='undefined' ? window : globalThis);

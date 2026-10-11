@@ -1,6 +1,6 @@
 name: Scene Score Advisor
 description: Learn explainable scene score suggestions from tags, with separate ratings and a 1–5 display.
-version: 0.1.0
+version: 0.2.0
 url: https://github.com/helperbot-3/stash-scene-score-advisor-plugin
 ui:
   javascript:
