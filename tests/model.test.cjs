@@ -83,3 +83,38 @@ test('correction reverses direction, survives learning, and skip preserves its c
   assert.deepEqual(M.decisionRule(rule,'reset'),{});
   assert.throws(()=>M.decisionRule({},'correct',0,101));
 });
+test('guided recalibration reduces saturation while preserving direction and the original state',async()=>{
+ const scenes=samples();
+ const model=await M.train(scenes);
+ const state={version:1,model,rules:{positive:{weight:80,review:'corrected'},negative:{weight:-5,review:'corrected'}}};
+ const original=JSON.stringify(state),preview=await M.recalibrate(scenes,state);
+ assert.equal(JSON.stringify(state),original);
+ assert.ok(preview.rules.positive.weight>=0&&preview.rules.positive.weight<80);
+ assert.ok(preview.rules.negative.weight<=0);
+ assert.equal(preview.rules.positive.guidanceWeight,80);
+ assert.ok(preview.after.above<preview.before.above);
+ assert.ok(preview.heldOut.after<preview.heldOut.before);
+ assert.equal(preview.model.guided,true);
+ assert.equal(preview.heldOut.count,20);
+ M.validateState({...state,model:preview.model,rules:preview.rules});
+});
+test('recalibration respects locks, zero corrections, exclusions and unsupported corrections',async()=>{
+ const scenes=samples();scenes[0].tags.push({id:'rare',name:'Rare'});
+ const state={version:1,model:await M.train(scenes),metaIds:['positive'],rules:{positive:{weight:50},negative:{weight:-12,locked:true},rare:{weight:17},missing:{weight:29}}};
+ const p=await M.recalibrate(scenes,state);
+ assert.equal(p.rules.negative.weight,-12);assert.equal(p.rules.rare.weight,17);assert.equal(p.rules.missing.weight,29);
+ assert.ok(!p.model.tags.some(t=>t.id==='positive'));
+ const zero=await M.recalibrate(scenes,{...state,metaIds:[],rules:{positive:{weight:0}}});
+ assert.equal(zero.rules.positive.weight,0);
+ await assert.rejects(()=>M.recalibrate(samples(19),state),/at least 20/);
+});
+test('fresh correction replaces prior guidance; repeated recalibration retains its direction',async()=>{
+ const scenes=samples(),state={version:1,model:await M.train(scenes),rules:{positive:{weight:50}}};
+ const p=await M.recalibrate(scenes,state);
+ const second=await M.recalibrate(scenes,{...state,model:p.model,rules:p.rules});
+ assert.equal(second.rules.positive.guidanceWeight,50);
+ assert.ok(second.rules.positive.weight>=0);
+ const corrected=M.decisionRule(second.rules.positive,'correct',0,-10);
+ assert.equal(corrected.guidanceWeight,-10);
+ assert.equal(M.decisionRule(corrected,'lock',0,true).locked,true);
+});

@@ -38,6 +38,24 @@ Requires a Stash version supporting the plugin UI API, `configuration.plugins`, 
 
 **The plugin never writes scene ratings, scene tags, or scene custom fields.** Suggestions are calculated on demand from the model and scene tags. They are sortable within the advisor; they are not native Stash rating filters or persisted custom fields. Only advisor plugin settings are written. The optional compilation metadata lookup uses Stash’s `runPluginOperation` mutation with the read-only `screening_list` action.
 
+## Guided recalibration (0.3.0)
+
+After reviewing your labels, choose **Recalibrate from my ratings** (at least 20 rated scenes). This jointly refits the starting score and label strengths; it does not merely rescale the final scores.
+
+Your manual corrections guide the refit: positive corrections stay non-negative, negative corrections stay non-positive, and explicit zero stays zero. Strengths may shrink to zero. Ignored and automatic metadata labels remain excluded. Accepted labels continue to follow learning. Manual corrections with fewer than three rated examples retain their exact values. Labels absent from training also retain their saved correction.
+
+To freeze a correction, open that label under **Review labels → Reviewed** and check **Lock exact contribution during recalibration**. This is available for numeric corrections. Uncheck to permit guided adjustment again.
+
+The preview compares held-out prediction error, the number of scenes displayed as 5.0, raw scores exceeding 5, maximum raw score, and the largest label-weight changes. The five-star count includes scores at least 4.95, which display as 5.0 to one decimal. Counts cover the loaded library; held-out errors compare models refitted without the same 20% of rated scenes. Earlier manual judgments may reflect those scenes, so this is not a completely independent prospective evaluation. Reduced saturation or improved error is not guaranteed.
+
+Choose **Apply recalibration** to save the proposal, or **Keep current model** to discard it. Preview alone writes nothing. **Undo recalibration** restores the preceding model, rules, and review history, including after a browser reload. This single-step backup remains until another rule edit or training result is saved; applying again replaces it. Applying clears the per-label undo stack to avoid mixing it with decisions from an older model, but retains current review decisions. Existing scene ratings are never changed.
+
+After applying guided learning, **Learn from my ratings** also opens a guided preview so later training does not silently revert to the old fixed-override workflow. New numeric corrections replace earlier guidance, while repeated recalibration retains the original guidance direction and prior strength.
+
+Implementation: constrained ridge regression with the existing L2 penalty of 10, plus a weak squared-distance penalty of 2 toward each unlocked correction's original value. Locked/zero/rare corrections are fixed while fitting; their contributions are included in the residual calculation. The preview's before-model reproduces ordinary learning plus overrides for the original model, or refits with fixed current corrections for an already-guided model. Both sides use the same training/held-out partition. The final proposed model is then fitted on all rated scenes.
+
+Performer, studio, and duration inputs remain possible future extensions; this release still uses scene tags only.
+
 ## Review labels (0.2.0)
 
 Open **Review labels** after learning. The queue starts with the largest absolute learned effects and hides automatically excluded metadata labels. Search and switch between Needs review, Skipped for now, Reviewed, or All eligible labels.
@@ -62,7 +80,7 @@ After upgrading from 0.1.0, reload the library and **Learn from my ratings** onc
 
 The model fits a starting score plus one coefficient per tag, minimizing squared error plus an L2 penalty (fixed strength 10). Binary tag presence is used; duplicates count once. A tag requires at least three rated training examples. Null/zero ratings are treated as unrated and excluded. Predictions are clipped to 20–100 internally (1–5 displayed).
 
-For 20 or more rated scenes, a reproducible 20% split is withheld, a model is trained only on the remaining scenes, and mean absolute error is compared with predicting the training-set average. The held-out check is performed **before** fitting the saved model on all rated scenes. It evaluates learned weights, not manual overrides. Smaller errors are better. The dashboard explicitly reports when tags fail to improve on the average baseline.
+For ordinary learning with 20 or more rated scenes, a reproducible 20% split is withheld, a model is trained only on the remaining scenes, and mean absolute error is compared with predicting the training-set average. The held-out check is performed **before** fitting the saved model on all rated scenes. Ordinary learning evaluates learned weights, not manual overrides; guided recalibration includes its constrained corrections. Smaller errors are better. The dashboard explicitly reports when tags fail to improve on the average baseline.
 
 Overrides **replace** a learned contribution; they are not added on top of it. Ignoring a tag immediately removes its contribution. Retrain after changing exclusions to refit the starting score and remaining weights. Overrides survive retraining. Blank an override to return to its learned weight.
 
@@ -82,7 +100,7 @@ The dashboard fetches scene metadata in batches of 500 and holds it in browser m
 - `npm test` — regression, validation, prediction, storage validation, and safety tests.
 - `npm run build` — creates the installable ZIP and Stash source index in `_site/main`.
 
-For browser integration, launch a **separate disposable Stash** on `127.0.0.1:19998` with this repository's `plugins` directory. Run `python3 tests/seed-demo.py` once on its empty library, then `node tests/browser.cjs` and `node tests/review-browser.cjs` (Chrome required). The script checks learning, server persistence, manual weights, scene integration, ignored tags, responsive layout, and absence of scene-rating writes. All screenshots and test data belong in ignored `.test-runtime/`.
+For browser integration, launch a **separate disposable Stash** on `127.0.0.1:19998` with this repository's `plugins` directory. Run `python3 tests/seed-demo.py` once on its empty library, then `node tests/browser.cjs` , `node tests/review-browser.cjs`, and `node tests/recalibration-browser.cjs` (Chrome required). The script checks learning, server persistence, manual weights, scene integration, ignored tags, responsive layout, and absence of scene-rating writes. All screenshots and test data belong in ignored `.test-runtime/`.
 
 License: AGPL-3.0; see LICENCE.
 

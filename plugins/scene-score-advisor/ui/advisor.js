@@ -69,7 +69,7 @@
     useEffect(()=>setDirection(null),[current?.id]);
     async function decide(kind,correction) {
       const index=queue.findIndex(t=>t.id===current.id),next=queue[index+1]||queue[0];
-      if(await onDecision(current.id,kind,learned?.weight||0,correction)){setFocus(next?.id);setDirection(null);}
+      if(await onDecision(current.id,kind,learned?.weight||0,correction)){if(kind!=='lock')setFocus(next?.id);setDirection(null);}
     }
     const examples=current?scenes.filter(s=>M.rated(s)&&s.tags.some(t=>String(t.id)===current.id)).sort((a,b)=>b.rating100-a.rating100):[];
     const samples=[...examples.slice(0,2),...examples.slice(-2)].filter((s,i,all)=>all.findIndex(t=>t.id===s.id)===i);
@@ -93,9 +93,28 @@
           h('label',null,'Exact contribution',h('input',{type:'number',min:-5,max:5,step:0.05,value:Math.round(draft*5)/100,disabled:busy,'aria-label':'Exact contribution',onChange:e=>{const n=e.target.valueAsNumber;if(Number.isFinite(n))setDraft(Math.max(-100,Math.min(100,n*20)));}})),
           button('Save correction and next',()=>decide('correct',draft),busy||(direction==='lower'?draft>=value:draft<=value)),button('Cancel correction',()=>setDirection(null),busy),
           h('p',{className:'ssa-muted'},'This replaces the learned contribution and survives retraining. Move across zero to reverse its direction.')),
+        Number.isFinite(rule.weight)&&h('label',{className:'ssa-lock'},h('input',{type:'checkbox',checked:!!rule.locked,disabled:busy,onChange:e=>decide('lock',e.target.checked)}),' Lock exact contribution during recalibration'),
         h('details',null,h('summary',null,'Examples with this label (',examples.length,' rated scenes)'),samples.length?h('ul',null,samples.map(s=>h('li',{key:s.id},h(Link,{to:'/scenes/'+s.id,target:'_blank',rel:'noopener noreferrer'},s.title||'Scene '+s.id),' · ',stars(s.rating100),' / 5'))):h('p',null,'No rated examples.')),
         h('p',{className:'ssa-muted'},'Decisions save automatically. Accept follows future learning; changes of 0.25 stars, or a direction reversal of at least 0.10 stars, return for review. Effect sizes describe score movement, not statistical confidence.')):
         h('p',{className:'ssa-empty'},filter==='pending'?'No labels left in this review queue. Check skipped labels or review your earlier decisions.':'No labels match this filter.'));
+  }
+  function CalibrationPreview({preview,busy,onApply,onCancel}) {
+    const check=preview.heldOut;
+    return h('section',{className:'ssa-review-card','aria-label':'Recalibration preview'},
+      h('h2',null,'Recalibration preview'),
+      h('p',null,'Your exclusions, review decisions and correction directions are preserved. Unlocked strengths and the starting score can change.'),
+      h('table',null,h('thead',null,h('tr',null,h('th',null,'Measure'),h('th',null,'Before'),h('th',null,'Proposed'))),
+        h('tbody',null,
+          h('tr',null,h('td',null,'Held-out error (stars; lower is better)'),h('td',null,stars(check.before)),h('td',null,stars(check.after))),
+          h('tr',null,h('td',null,'Scenes displayed as 5.0 / 5'),h('td',null,preview.before.top),h('td',null,preview.after.top)),
+          h('tr',null,h('td',null,'Raw scores exceeding 5'),h('td',null,preview.before.above),h('td',null,preview.after.above)),
+          h('tr',null,h('td',null,'Highest raw score (before clipping)'),h('td',null,stars(preview.before.maxRaw)),h('td',null,stars(preview.after.maxRaw))))),
+      h('p',{className:'ssa-notice'},check.after<check.before?'The recalibrated model improved the held-out check.':'The recalibrated model did not improve the held-out check. Consider keeping the current model.'),
+      h('p',{className:'ssa-muted'},'Error compares two models fitted without the same ',check.count,' held-out scenes. Your prior label judgments may still reflect those scenes. Counts describe the entire loaded library using the current and proposed saved models.'),
+      h('details',null,h('summary',null,preview.changes.length,' label strengths changed · show largest 20'),
+        h('table',null,h('thead',null,h('tr',null,h('th',null,'Label'),h('th',null,'Before'),h('th',null,'After'))),
+          h('tbody',null,preview.changes.slice(0,20).map(t=>h('tr',{key:t.id},h('td',null,t.name),h('td',null,delta(t.before)),h('td',null,delta(t.after))))))),
+      h('div',{className:'ssa-actions'},button('Apply recalibration',onApply,busy,{className:'ssa-primary'}),button('Keep current model',onCancel,busy)));
   }
   function TagRule({tag,learned,rule,onChange,disabled}) {
     const [value,setValue]=useState(rule.weight==null?'':String(rule.weight/20));
@@ -107,7 +126,7 @@
         e.currentTarget.reportValidity(); setValue(rule.weight==null?'':String(rule.weight/20)); return;
       }
       e.currentTarget.setCustomValidity('');
-      onChange({...rule,weight:text===''?null:Number(text)*20});
+      onChange({...rule,weight:text===''?null:Number(text)*20,guidanceWeight:text===''?null:Number(text)*20,locked:text===''?false:rule.locked,review:text===''?'unreviewed':'corrected'});
     }
     return h('tr',null,h('td',null,tag.name,tag.blocked && h('small',{className:'ssa-muted'},' · '+tag.reason+'; excluded')),
       h('td',null,tag.count),h('td',{className:learned && learned.weight<0?'ssa-negative':'ssa-positive'},learned?delta(learned.weight):'—'),
@@ -120,6 +139,8 @@
     const [state,setState]=useState(empty),[scenes,setScenes]=useState([]),[ready,setReady]=useState(false);
     const [busy,setBusy]=useState('Loading library…'),[error,setError]=useState(''),[dirty,setDirty]=useState(false);
     const [tab,setTab]=useState('scenes'),[search,setSearch]=useState(''),[unrated,setUnrated]=useState(true),[page,setPage]=useState(1);
+    const [preview,setPreview]=useState(null);
+    useEffect(()=>setPreview(null),[state,scenes]);
     const [sort,setSort]=useState('score'),[metaWarning,setMetaWarning]=useState('');
     async function refresh() {
       setBusy('Loading library…');setError('');
@@ -139,21 +160,35 @@
       } catch(e){setError(e.message);} finally{setBusy('');}
     }
     useEffect(()=>{refresh();},[]);
-    async function save(next=state) {
+    async function save(next={...state,recalibrationUndo:null}) {
       setBusy('Saving settings…');setError('');
       try{await saveState(client,next);setState(next);setDirty(false);}catch(e){setError(e.message);}finally{setBusy('');}
     }
     async function learn() {
+      if(state.model?.guided){await previewCalibration();return;}
       setBusy('Learning and checking tag weights…');setError('');
       try {
-        const model=await M.train(scenes,M.effectiveRules(state)), next={...state,model};
+        const model=await M.train(scenes,M.effectiveRules(state)), next={...state,model,recalibrationUndo:null};
         setState(next);setDirty(true);
         await saveState(client,next);setDirty(false);
       }catch(e){setError(e.message);}finally{setBusy('');}
     }
+    async function previewCalibration() {
+      setBusy('Recalibrating label strengths and checking predictions…');setError('');setPreview(null);
+      try{setPreview(await M.recalibrate(scenes,state));}catch(e){setError(e.message);}finally{setBusy('');}
+    }
+    async function applyCalibration() {
+      if(!preview)return;
+      const next={...state,model:preview.model,rules:preview.rules,history:[],recalibrationUndo:{model:state.model,rules:state.rules,history:state.history||[]}};
+      await save(next);
+    }
+    async function undoCalibration() {
+      const previous=state.recalibrationUndo;if(!previous)return;
+      await save({...state,...previous,recalibrationUndo:null});
+    }
     async function persistDecision(next) {
       setBusy('Saving review decision…');setError('');
-      try{await saveState(client,next);setState(next);setDirty(false);return true;}
+      try{await saveState(client,{...next,recalibrationUndo:null});setState({...next,recalibrationUndo:null});setDirty(false);return true;}
       catch(e){setError('Decision not saved: '+e.message);return false;}
       finally{setBusy('');}
     }
@@ -185,7 +220,7 @@
     const outdated=state.model && (state.model.exclusionRevision!==2 || state.model.fingerprint!==fingerprint || JSON.stringify(ignored)!==JSON.stringify(state.model.ignored));
     return h('main',{className:'ssa'},
       h('header',{className:'ssa-header'},h('div',null,h('span',{className:'ssa-eyebrow'},'YOUR LIBRARY · YOUR TASTE'),h('h1',null,'Scene Score Advisor'),h('p',null,'Discover what your tags suggest. Your own ratings stay yours.')),
-        h('div',{className:'ssa-actions'},button('Reload library',refresh,!!busy||dirty),button('Learn from my ratings',learn,!!busy||!ready||ratedCount<10,{className:'ssa-primary'}),dirty&&button('Save changes',()=>save(),!!busy))),
+        h('div',{className:'ssa-actions'},button('Reload library',refresh,!!busy||dirty),button('Learn from my ratings',learn,!!busy||!ready||ratedCount<10,{className:'ssa-primary'}),button('Recalibrate from my ratings',previewCalibration,!!busy||!state.model||ratedCount<20),state.recalibrationUndo&&button('Undo recalibration',undoCalibration,!!busy||dirty),dirty&&button('Save changes',()=>save(),!!busy))),
       metaWarning&&h('p',{className:'ssa-notice'},metaWarning),
       error&&h('p',{role:'alert',className:'ssa-error'},error),
       busy&&h('p',{role:'status'},busy),
@@ -197,8 +232,10 @@
         h('div',null,h('strong',null,state.model?.tags.length||0),h('span',null,'learned tag weights')),
         h('div',null,h('strong',null,validation?stars(validation.mae):'—'),h('span',null,'held-out error in stars'))),
       !state.model&&h('section',{className:'ssa-notice'},h('h2',null,'Start with the ratings you already trust'),h('p',null,ratedCount<10?'Rate at least 10 scenes to start learning. At 20 rated scenes, the advisor can also test its predictions.':'Review the Tag weights tab for rating-derived tags, then choose “Learn from my ratings”.'),h('p',null,'Weights are learned from scene tags only. Rare tags need at least 3 rated examples.')),
+      state.model&&h('p',{className:'ssa-muted'},M.scoreSummary(scenes,state.model,M.effectiveRules(state)).top,' of ',scenes.length,' scenes display 5.0 / 5. Recalibration requires at least 20 rated scenes.'),
+      preview&&h(CalibrationPreview,{preview,busy:!!busy,onApply:applyCalibration,onCancel:()=>setPreview(null)}),
       state.model&&h('section',{className:'ssa-validation'},h('p',null,'Learned from ',state.model.ratedCount,' rated scenes · ',new Date(state.model.trainedAt).toLocaleString()),
-        validation?h('p',null,'Held-out check on ',validation.count,' scenes: average error ',stars(validation.mae),' stars; predicting your average rating: ',stars(validation.baselineMae),' stars. ',validation.mae<validation.baselineMae?'Tags improved this check.':'Tags did not improve this check; treat suggestions cautiously.',' This check evaluates learned weights before manual adjustments.'):h('p',null,'Not enough rated scenes for a held-out check (20 required).')),
+        validation?h('p',null,'Held-out check on ',validation.count,' scenes: average error ',stars(validation.mae),' stars; predicting your average rating: ',stars(validation.baselineMae),' stars. ',validation.mae<validation.baselineMae?'Tags improved this check.':'Tags did not improve this check; treat suggestions cautiously.',state.model.guided?' This check includes guided corrections.':' This check evaluates learned weights before manual adjustments.'):h('p',null,'Not enough rated scenes for a held-out check (20 required).')),
       h('div',{className:'ssa-toolbar'},h('div',{className:'ssa-tabs'},['scenes','review','tags'].map(key=>button(key==='scenes'?'Scene suggestions':key==='review'?'Review labels':'Tag weights',()=>{setTab(key);setSearch('');setPage(1);},false,{'aria-pressed':tab===key,key}))),
         h('input',{type:'search','aria-label':tab==='scenes'?'Search scenes':'Search tags',placeholder:tab==='scenes'?'Search scenes…':'Search tags…',value:search,onChange:e=>{setSearch(e.target.value);setPage(1);}}),
         tab==='scenes'&&h('label',null,h('input',{type:'checkbox',checked:unrated,onChange:e=>{setUnrated(e.target.checked);setPage(1);}}),' Unrated only'),

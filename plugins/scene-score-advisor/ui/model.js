@@ -21,9 +21,9 @@
     for (const char of String(value)) result = Math.imul(result ^ char.charCodeAt(0), 16777619);
     return result >>> 0;
   }
-  async function fit(scenes, ignored = {}, lambda = 10) {
+  async function fit(scenes, ignored = {}, lambda = 10, guidance = null) {
     if (!scenes.length) throw new Error('No rated scenes available.');
-    const tags = catalog(scenes).filter(t => !t.blocked && !ignored[t.id] && t.count >= 3);
+    const tags = catalog(scenes).filter(t => !t.blocked && !ignored[t.id] && (t.count >= 3 || Number.isFinite(guidance?.[t.id]?.weight)));
     const index = new Map(tags.map((t,i) => [t.id,i]));
     const columns = tags.map(() => []);
     scenes.forEach((s,row) => ids(s).forEach(id => { if (index.has(id)) columns[index.get(id)].push(row); }));
@@ -40,7 +40,14 @@
         const previous = weights[col];
         let sum = 0;
         rows.forEach(row => { sum += residual[row]+previous; });
-        const next = sum/(rows.length+lambda);
+        const rule=guidance?.[tags[col].id];
+        const manual=Number.isFinite(rule?.weight);
+        const target=manual?(rule.guidanceWeight ?? rule.weight):0;
+        let next = manual ? (sum+2*target)/(rows.length+lambda+2) : sum/(rows.length+lambda);
+        if(manual) {
+          if(rule.locked || rows.length<3 || target===0) next=rule.weight;
+          else next=target>0?Math.min(100,Math.max(0,next)):Math.max(-100,Math.min(0,next));
+        }
         weights[col] = next;
         const change = next-previous;
         rows.forEach(row => { residual[row]-=change; });
@@ -94,6 +101,53 @@
     return {...fitted, version:1, trainedAt:new Date().toISOString(), ratedCount:rows.length, validation,
       exclusionRevision:2, ignored:Object.keys(ignored).sort(), fingerprint:fingerprint(scenes)};
   }
+  function adjustedRules(rules, model) {
+    const result=JSON.parse(JSON.stringify(rules));
+    for(const tag of model.tags) {
+      const rule=result[tag.id];
+      if(rule && !rule.ignore && Number.isFinite(rule.weight) && !rule.locked && tag.count>=3) {
+        rule.guidanceWeight=rule.guidanceWeight ?? rule.weight;
+        rule.weight=tag.weight;
+      }
+    }
+    return result;
+  }
+  function scoreSummary(scenes,model,rules) {
+    const predict=createPredictor(model,rules);
+    let above=0,top=0,maxRaw=-Infinity,error=0,count=0;
+    for(const scene of scenes) {
+      const p=predict(scene);if(!p)continue;
+      if(p.raw>100)above++;if(p.score>=99)top++;
+      maxRaw=Math.max(maxRaw,p.raw);
+      if(rated(scene)){error+=Math.abs(p.score-scene.rating100);count++;}
+    }
+    return {count:scenes.length,above,top,maxRaw:Number.isFinite(maxRaw)?maxRaw:null,mae:count?error/count:null};
+  }
+  async function recalibrate(scenes,state) {
+    const rows=scenes.filter(rated);
+    if(rows.length<20)throw new Error('Rate at least 20 scenes for a recalibration preview with a held-out check.');
+    const rules=effectiveRules(state);
+    const ignored=Object.fromEntries(Object.entries(rules).filter(([,r])=>r.ignore).map(([id])=>[id,true]));
+    const sorted=rows.slice().sort((a,b)=>hash(a.id)-hash(b.id)||String(a.id).localeCompare(String(b.id)));
+    const size=Math.max(4,Math.floor(rows.length*0.2)), test=sorted.slice(0,size), training=sorted.slice(size);
+    const fixed=Object.fromEntries(Object.entries(rules).map(([id,r])=>[id,{...r,locked:true}]));
+    const beforeFit=await fit(training,ignored,10,state.model?.guided?fixed:null);
+    const afterFit=await fit(training,ignored,10,rules);
+    const beforeCheck=scoreSummary(test,beforeFit,rules);
+    const afterCheck=scoreSummary(test,afterFit,adjustedRules(rules,afterFit));
+    const fitted=await fit(rows,ignored,10,rules);
+    const mean=training.reduce((sum,r)=>sum+r.rating100,0)/training.length;
+    const baselineMae=test.reduce((sum,s)=>sum+Math.abs(clamp(mean)-s.rating100),0)/test.length;
+    const model={...fitted,version:1,trainedAt:new Date().toISOString(),ratedCount:rows.length,
+      validation:{count:size,mae:afterCheck.mae,baselineMae,guided:true},
+      exclusionRevision:2,ignored:Object.keys(ignored).sort(),fingerprint:fingerprint(scenes),guided:true};
+    const proposed=adjustedRules(state.rules,model);
+    const effective=effectiveRules({...state,rules:proposed});
+    const oldWeights=new Map((state.model?.tags||[]).map(t=>[t.id,t.weight]));
+    const changes=model.tags.map(tag=>({id:tag.id,name:tag.name,before:Number.isFinite(state.rules[tag.id]?.weight)?state.rules[tag.id].weight:oldWeights.get(tag.id)||0,after:tag.weight})).filter(t=>Math.abs(t.after-t.before)>=0.01).sort((a,b)=>Math.abs(b.after-b.before)-Math.abs(a.after-a.before));
+    return {model,rules:proposed,changes,heldOut:{count:size,before:beforeCheck.mae,after:afterCheck.mae},
+      before:scoreSummary(scenes,state.model,rules),after:scoreSummary(scenes,model,effective)};
+  }
   function fingerprint(scenes) {
     return hash(JSON.stringify(scenes.filter(rated).map(s=>[String(s.id),s.rating100,(s.tags||[]).map(t=>[String(t.id),t.name]).sort((a,b)=>a[0].localeCompare(b[0]))]).sort((a,b)=>a[0].localeCompare(b[0]))));
   }
@@ -114,27 +168,28 @@
   }
   function decisionRule(rule, decision, learnedWeight = 0, correction) {
     const next={...rule,reviewedAt:new Date().toISOString()};
-    if (decision==='accept') return {...next,ignore:false,weight:null,review:'accepted',acceptedWeight:learnedWeight};
+    if (decision==='accept') return {...next,ignore:false,weight:null,locked:false,guidanceWeight:null,review:'accepted',acceptedWeight:learnedWeight};
     if (decision==='ignore') return {...next,ignore:true,review:'ignored'};
     if (decision==='skip') return {...next,review:'skipped'};
     if (decision==='correct') {
       if (!Number.isFinite(correction) || Math.abs(correction)>100) throw new Error('Use a contribution between −5 and +5 stars.');
-      return {...next,ignore:false,weight:correction,review:'corrected'};
+      return {...next,ignore:false,weight:correction,guidanceWeight:correction,review:'corrected'};
     }
+    if (decision==='lock') return {...next,locked:!!correction};
     if (decision==='reset') return {};
     throw new Error('Unknown review decision.');
   }
   function validateState(state) {
     if (!state || state.version!==1 || !state.rules || typeof state.rules!=='object' || Array.isArray(state.rules)) throw new Error('Unsupported saved advisor settings.');
     Object.values(state.rules).forEach(r=>{
-      if (!r || (r.weight!=null && (!Number.isFinite(r.weight) || Math.abs(r.weight)>100)) || (r.ignore!=null && typeof r.ignore!=='boolean')) throw new Error('Invalid saved tag rule.');
+      if (!r || (r.guidanceWeight!=null && (!Number.isFinite(r.guidanceWeight)||Math.abs(r.guidanceWeight)>100)) || (r.locked!=null && typeof r.locked!=='boolean') || (r.weight!=null && (!Number.isFinite(r.weight) || Math.abs(r.weight)>100)) || (r.ignore!=null && typeof r.ignore!=='boolean')) throw new Error('Invalid saved tag rule.');
     });
     if (state.metaIds && (!Array.isArray(state.metaIds) || !state.metaIds.every(id=>typeof id==='string'))) throw new Error('Invalid automatic exclusions.');
     const m=state.model;
     if (m && (m.version!==1 || !Number.isFinite(m.baseline) || !Array.isArray(m.tags) || !m.tags.every(t=>typeof t.id==='string' && Number.isFinite(t.weight) && Number.isFinite(t.count)))) throw new Error('Invalid saved model.');
     return state;
   }
-  const api = {effectiveRules,reviewStatus,decisionRule,metaName,clamp,rated,excluded,catalog,fit,createPredictor,predict,train,fingerprint,validateState};
+  const api = {recalibrate,adjustedRules,scoreSummary,effectiveRules,reviewStatus,decisionRule,metaName,clamp,rated,excluded,catalog,fit,createPredictor,predict,train,fingerprint,validateState};
   if (typeof module!=='undefined' && module.exports) module.exports=api;
   else root.SceneScoreAdvisorModel=api;
 })(typeof window!=='undefined' ? window : globalThis);
