@@ -21,9 +21,21 @@
     for (const char of String(value)) result = Math.imul(result ^ char.charCodeAt(0), 16777619);
     return result >>> 0;
   }
-  async function fit(scenes, ignored = {}, lambda = 10, guidance = null) {
+  function entityFeatures(scene,inputs={}) {
+    const result=[];
+    if(inputs.performers)for(const p of scene.performers||[])result.push({id:'@performer:'+p.id,name:'Performer: '+(p.name||p.id),kind:'performer'});
+    if(inputs.studios && scene.studio)result.push({id:'@studio:'+scene.studio.id,name:'Studio: '+(scene.studio.name||scene.studio.id),kind:'studio'});
+    return [...new Map(result.map(e=>[e.id,e])).values()];
+  }
+  function inputName(inputs={}) {
+    return 'Labels'+(inputs.performers?' + performers':'')+(inputs.studios?' + studios':'');
+  }
+  async function fit(scenes, ignored = {}, lambda = 10, guidance = null, inputs = {}) {
     if (!scenes.length) throw new Error('No rated scenes available.');
-    const tags = catalog(scenes).filter(t => !t.blocked && !ignored[t.id] && (t.count >= 3 || Number.isFinite(guidance?.[t.id]?.weight)));
+    const source=scenes;
+    const entityMap=new Map(source.flatMap(s=>entityFeatures(s,inputs)).map(e=>[e.id,e]));
+    scenes=source.map(s=>({...s,tags:[...(s.tags||[]),...entityFeatures(s,inputs)]}));
+    const tags = catalog(scenes).filter(t => !t.blocked && !ignored[t.id] && (t.count >= (entityMap.has(t.id)?5:3) || (!entityMap.has(t.id)&&Number.isFinite(guidance?.[t.id]?.weight))));
     const index = new Map(tags.map((t,i) => [t.id,i]));
     const columns = tags.map(() => []);
     scenes.forEach((s,row) => ids(s).forEach(id => { if (index.has(id)) columns[index.get(id)].push(row); }));
@@ -40,10 +52,12 @@
         const previous = weights[col];
         let sum = 0;
         rows.forEach(row => { sum += residual[row]+previous; });
-        const rule=guidance?.[tags[col].id];
+        const entity=entityMap.has(tags[col].id);
+        const penalty=entity?40:lambda;
+        const rule=entity?null:guidance?.[tags[col].id];
         const manual=Number.isFinite(rule?.weight);
         const target=manual?(rule.guidanceWeight ?? rule.weight):0;
-        let next = manual ? (sum+2*target)/(rows.length+lambda+2) : sum/(rows.length+lambda);
+        let next = manual ? (sum+2*target)/(rows.length+penalty+2) : sum/(rows.length+penalty);
         if(manual) {
           if(rule.locked || rows.length<3 || target===0) next=rule.weight;
           else next=target>0?Math.min(100,Math.max(0,next)):Math.max(-100,Math.min(0,next));
@@ -57,11 +71,13 @@
       if (sweep%5===0) await pause();
     }
     if (!converged) throw new Error('The model did not converge. Exclude redundant tags and try again.');
-    return {baseline, tags:tags.map((t,i) => ({...t, weight:weights[i]}))};
+    const fitted=tags.map((t,i)=>({...t,weight:weights[i]}));
+    return {baseline,tags:fitted.filter(t=>!entityMap.has(t.id)),entities:fitted.filter(t=>entityMap.has(t.id)).map(t=>({...t,kind:entityMap.get(t.id).kind})),inputs:{performers:!!inputs.performers,studios:!!inputs.studios}};
   }
   function createPredictor(model, rules = {}) {
     if (!model) return () => null;
     const learned = new Map(model.tags.map(t => [t.id,t]));
+    const entities=new Map((model.entities||[]).map(t=>[t.id,t]));
     return function (scene) {
     const contributions = [], unknown = [];
     let raw = model.baseline;
@@ -74,6 +90,13 @@
       const value = manual ? rule.weight : entry.weight;
       raw += value;
       contributions.push({id, name:tag.name, value, count:entry ? entry.count : 0, manual});
+    }
+    if(model.inputs?.performers && !(scene.performers||[]).length)unknown.push('Performer metadata unavailable');
+    if(model.inputs?.studios && !scene.studio)unknown.push('Studio metadata unavailable');
+    for(const entity of entityFeatures(scene,model.inputs)) {
+      const entry=entities.get(entity.id);
+      if(!entry){unknown.push(entity.name);continue;}
+      raw+=entry.weight;contributions.push({...entity,value:entry.weight,count:entry.count,manual:false});
     }
     contributions.sort((a,b) => Math.abs(b.value)-Math.abs(a.value));
     return {score:clamp(raw), raw, baseline:model.baseline, contributions, unknown,
@@ -131,16 +154,16 @@
     const sorted=rows.slice().sort((a,b)=>hash(a.id)-hash(b.id)||String(a.id).localeCompare(String(b.id)));
     const size=Math.max(4,Math.floor(rows.length*0.2)), test=sorted.slice(0,size), training=sorted.slice(size);
     const fixed=Object.fromEntries(Object.entries(rules).map(([id,r])=>[id,{...r,locked:true}]));
-    const beforeFit=await fit(training,ignored,10,state.model?.guided?fixed:null);
-    const afterFit=await fit(training,ignored,10,rules);
+    const beforeFit=await fit(training,ignored,10,state.model?.guided?fixed:null,state.model?.inputs);
+    const afterFit=await fit(training,ignored,10,rules,state.model?.inputs);
     const beforeCheck=scoreSummary(test,beforeFit,rules);
     const afterCheck=scoreSummary(test,afterFit,adjustedRules(rules,afterFit));
-    const fitted=await fit(rows,ignored,10,rules);
+    const fitted=await fit(rows,ignored,10,rules,state.model?.inputs);
     const mean=training.reduce((sum,r)=>sum+r.rating100,0)/training.length;
     const baselineMae=test.reduce((sum,s)=>sum+Math.abs(clamp(mean)-s.rating100),0)/test.length;
     const model={...fitted,version:1,trainedAt:new Date().toISOString(),ratedCount:rows.length,
       validation:{count:size,mae:afterCheck.mae,baselineMae,guided:true},
-      exclusionRevision:2,ignored:Object.keys(ignored).sort(),fingerprint:fingerprint(scenes),guided:true};
+      exclusionRevision:2,ignored:Object.keys(ignored).sort(),fingerprint:fingerprint(scenes,fitted.inputs),guided:true};
     const proposed=adjustedRules(state.rules,model);
     const effective=effectiveRules({...state,rules:proposed});
     const oldWeights=new Map((state.model?.tags||[]).map(t=>[t.id,t.weight]));
@@ -148,7 +171,32 @@
     return {model,rules:proposed,changes,heldOut:{count:size,before:beforeCheck.mae,after:afterCheck.mae},
       before:scoreSummary(scenes,state.model,rules),after:scoreSummary(scenes,model,effective)};
   }
-  function fingerprint(scenes) {
+  async function compareInputs(scenes,state) {
+    const rows=scenes.filter(rated);
+    if(rows.length<20)throw new Error('Rate at least 20 scenes to compare prediction inputs.');
+    const rules=effectiveRules(state),ignored=Object.fromEntries(Object.entries(rules).filter(([,r])=>r.ignore).map(([id])=>[id,true]));
+    const sorted=rows.slice().sort((a,b)=>hash(a.id)-hash(b.id)||String(a.id).localeCompare(String(b.id)));
+    const size=Math.max(4,Math.floor(rows.length*0.2)),test=sorted.slice(0,size),training=sorted.slice(size);
+    const mean=training.reduce((n,s)=>n+s.rating100,0)/training.length;
+    const baselineMae=test.reduce((n,s)=>n+Math.abs(clamp(mean)-s.rating100),0)/test.length;
+    const candidates=[];
+    for(const inputs of [{},{performers:true},{studios:true},{performers:true,studios:true}]) {
+      const trial=await fit(training,ignored,10,rules,inputs);
+      const error=scoreSummary(test,trial,adjustedRules(rules,trial)).mae;
+      const fitted=await fit(rows,ignored,10,rules,inputs);
+      const model={...fitted,version:1,guided:true,trainedAt:new Date().toISOString(),ratedCount:rows.length,
+        validation:{count:size,mae:error,baselineMae,guided:true,comparison:true},exclusionRevision:2,
+        ignored:Object.keys(ignored).sort(),fingerprint:fingerprint(scenes,inputs)};
+      const proposed=adjustedRules(state.rules,model);
+      candidates.push({name:inputName(inputs),model,rules:proposed,error,entityCount:fitted.entities.length,
+        summary:scoreSummary(scenes,model,effectiveRules({...state,rules:proposed}))});
+    }
+    candidates.forEach((c,i)=>{c.improved=i===0||c.error<candidates[0].error-0.000001;});
+    let best=0;candidates.forEach((c,i)=>{if(c.error<candidates[best].error-0.000001)best=i;});
+    return {count:size,candidates,best};
+  }
+  function fingerprint(scenes,inputs={}) {
+    if(inputs.performers||inputs.studios)return hash(JSON.stringify([fingerprint(scenes),scenes.filter(rated).map(s=>[String(s.id),entityFeatures(s,inputs).map(e=>e.id).sort()]).sort((a,b)=>a[0].localeCompare(b[0]))]));
     return hash(JSON.stringify(scenes.filter(rated).map(s=>[String(s.id),s.rating100,(s.tags||[]).map(t=>[String(t.id),t.name]).sort((a,b)=>a[0].localeCompare(b[0]))]).sort((a,b)=>a[0].localeCompare(b[0]))));
   }
   function effectiveRules(state) {
@@ -187,9 +235,11 @@
     if (state.metaIds && (!Array.isArray(state.metaIds) || !state.metaIds.every(id=>typeof id==='string'))) throw new Error('Invalid automatic exclusions.');
     const m=state.model;
     if (m && (m.version!==1 || !Number.isFinite(m.baseline) || !Array.isArray(m.tags) || !m.tags.every(t=>typeof t.id==='string' && Number.isFinite(t.weight) && Number.isFinite(t.count)))) throw new Error('Invalid saved model.');
+    if(m?.inputs && ['performers','studios'].some(k=>typeof m.inputs[k]!=='boolean'))throw new Error('Invalid model inputs.');
+    if(m?.entities && (!Array.isArray(m.entities)||!m.entities.every(t=>typeof t.id==='string'&&Number.isFinite(t.weight)&&Number.isFinite(t.count)&&['performer','studio'].includes(t.kind))))throw new Error('Invalid entity weights.');
     return state;
   }
-  const api = {recalibrate,adjustedRules,scoreSummary,effectiveRules,reviewStatus,decisionRule,metaName,clamp,rated,excluded,catalog,fit,createPredictor,predict,train,fingerprint,validateState};
+  const api = {compareInputs,entityFeatures,inputName,recalibrate,adjustedRules,scoreSummary,effectiveRules,reviewStatus,decisionRule,metaName,clamp,rated,excluded,catalog,fit,createPredictor,predict,train,fingerprint,validateState};
   if (typeof module!=='undefined' && module.exports) module.exports=api;
   else root.SceneScoreAdvisorModel=api;
 })(typeof window!=='undefined' ? window : globalThis);

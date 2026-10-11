@@ -118,3 +118,33 @@ test('fresh correction replaces prior guidance; repeated recalibration retains i
  assert.equal(corrected.guidanceWeight,-10);
  assert.equal(M.decisionRule(corrected,'lock',0,true).locked,true);
 });
+function entitySamples(n=200){return Array.from({length:n},(_,i)=>({id:String(i+1),rating100:40+(i%2?35:0)+(i%4>=2?10:0),tags:[{id:'1',name:'Common'}],performers:[{id:String(i%2+1),name:i%2?'Preferred':'Other'}],studio:{id:String(i%4>=2?2:1),name:i%4>=2?'Studio B':'Studio A'}}));}
+test('input comparison learns entity signals on a shared split without changing state',async()=>{
+ const scenes=entitySamples(),state={version:1,model:await M.train(scenes),rules:{'1':{weight:0,locked:true}},metaIds:[]};
+ const original=JSON.stringify(state),result=await M.compareInputs(scenes,state);
+ assert.equal(JSON.stringify(state),original);assert.equal(result.candidates.length,4);assert.equal(result.count,40);
+ assert.ok(result.candidates[3].error<result.candidates[0].error);assert.ok(result.best>0);
+ const combined=result.candidates[3];assert.equal(combined.model.entities.length,4);
+ assert.equal(combined.rules['1'].weight,0);
+ const p=M.predict(scenes[3],combined.model,combined.rules);assert.ok(p.contributions.some(t=>t.kind==='performer'));assert.ok(p.contributions.some(t=>t.kind==='studio'));
+ M.validateState({...state,model:combined.model});
+ const next=await M.recalibrate(scenes,{...state,model:combined.model,rules:combined.rules});
+ assert.deepEqual(next.model.inputs,{performers:true,studios:true});assert.equal(next.model.entities.length,4);
+});
+test('rare/unseen entities have no contribution, IDs cannot collide, and cast duplicates count once',async()=>{
+ const scenes=entitySamples();scenes[0].performers.push({id:'rare',name:'Rare'});
+ const result=await M.compareInputs(scenes,{model:await M.train(scenes),rules:{}}),model=result.candidates[3].model;
+ assert.ok(!model.entities.some(t=>t.id==='@performer:rare'));
+ const scene={tags:[{id:'1',name:'Common'}],performers:[{id:'new',name:'New'}],studio:null};
+ const p=M.predict(scene,model);assert.ok(p.unknown.includes('Performer: New'));assert.ok(!p.contributions.some(t=>t.kind));
+ const once=M.predict(scenes[1],model).score;
+ assert.equal(M.predict({...scenes[1],performers:[...scenes[1].performers,...scenes[1].performers]},model).score,once);
+ assert.ok(model.tags.some(t=>t.id==='1'));assert.ok(model.entities.some(t=>t.id==='@performer:1'));assert.ok(model.entities.some(t=>t.id==='@studio:1'));
+});
+test('uninformative entities are not recommended and old label-only models ignore entity metadata',async()=>{
+ const scenes=entitySamples().map(s=>({...s,rating100:60})),model=await M.train(scenes);
+ const result=await M.compareInputs(scenes,{model,rules:{}});assert.equal(result.best,0);assert.ok(result.candidates.slice(1).every(c=>!c.improved));
+ const original=M.fingerprint(scenes),full=M.fingerprint(scenes,{performers:true});
+ scenes[0].performers=[{id:'changed',name:'Changed'}];assert.equal(M.fingerprint(scenes),original);assert.notEqual(M.fingerprint(scenes,{performers:true}),full);
+ assert.equal(M.predict(scenes[0],{baseline:60,tags:[]}).score,60);
+});

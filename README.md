@@ -36,7 +36,19 @@ Requires a Stash version supporting the plugin UI API, `configuration.plugins`, 
 - Sorts scene suggestions and searches scenes/tags, with 50 rows per page.
 - Stores the model and overrides on the Stash server in this plugin's configuration, shared across browsers.
 
-**The plugin never writes scene ratings, scene tags, or scene custom fields.** Suggestions are calculated on demand from the model and scene tags. They are sortable within the advisor; they are not native Stash rating filters or persisted custom fields. Only advisor plugin settings are written. The optional compilation metadata lookup uses Stash’s `runPluginOperation` mutation with the read-only `screening_list` action.
+**The plugin never writes scene ratings, scene tags, or scene custom fields.** Suggestions are calculated on demand from the model, scene tags, and any enabled performer/studio inputs. They are sortable within the advisor; they are not native Stash rating filters or persisted custom fields. Only advisor plugin settings are written. The optional compilation metadata lookup uses Stash’s `runPluginOperation` mutation with the read-only `screening_list` action.
+
+## Optional performers and studios (0.4.0)
+
+Update through your existing Stash source, refresh the browser, and choose **Compare prediction inputs** after loading a trained model (at least 20 rated scenes required). This tests four alternatives: labels only, labels + performers, labels + studios, and labels + both. The lowest held-out error is preselected; ties prefer the earlier, simpler option. An expanded option can only be applied if its error is strictly lower than labels alone. Labels-only remains available for returning to tag-based predictions.
+
+Each alternative uses the same deterministic 80/20 rated-scene split and guided label fitting, respecting your exclusions, correction directions, exact locks, and saved reviews. The entity vocabulary and minimum counts for validation are learned only from the training subset. Each candidate is then refitted on all rated scenes for use if applied. The displayed error is a model-selection check rather than an independent final accuracy estimate; earlier manual label judgments may also reflect the held-out scenes. Small improvements can be noise and are not a guarantee of better future ratings.
+
+Performer and studio identities are separate binary inputs, deduplicated per scene and namespaced independently of tags and each other. They require at least five rated examples and use a stronger ridge penalty (40 versus 10 for labels). Rare, unseen, or missing entities add no contribution; missing/unlearned metadata is disclosed in the score breakdown. Multiple performers can contribute, but a duplicated cast entry counts only once. No performer ratings, studio ratings, demographics, activity counts, or duration are used.
+
+Choose **Apply selected model** to save the chosen inputs, jointly refitted weights, and corrections. Nothing is saved during comparison. **Undo recalibration** also restores the prior input selection and model after an input-model change; it follows the same single-step backup rules below. Subsequent recalibration retains the selected inputs. **Active inputs** identifies the saved mode, the performer/studio effects table lists the largest 50 effects, and every scene score breakdown names its entity contributions.
+
+Existing label-only models continue working without automatic changes. Performer/studio changes on rated scenes trigger the stale-model notice after reloading when those input types are enabled. No scene, tag, performer, or studio records are written by this feature.
 
 ## Guided recalibration (0.3.0)
 
@@ -54,7 +66,7 @@ After applying guided learning, **Learn from my ratings** also opens a guided pr
 
 Implementation: constrained ridge regression with the existing L2 penalty of 10, plus a weak squared-distance penalty of 2 toward each unlocked correction's original value. Locked/zero/rare corrections are fixed while fitting; their contributions are included in the residual calculation. The preview's before-model reproduces ordinary learning plus overrides for the original model, or refits with fixed current corrections for an already-guided model. Both sides use the same training/held-out partition. The final proposed model is then fitted on all rated scenes.
 
-Performer, studio, and duration inputs remain possible future extensions; this release still uses scene tags only.
+Duration and other metadata remain future candidates; performer and studio inputs are optional as described above.
 
 ## Review labels (0.2.0)
 
@@ -84,7 +96,7 @@ For ordinary learning with 20 or more rated scenes, a reproducible 20% split is 
 
 Overrides **replace** a learned contribution; they are not added on top of it. Ignoring a tag immediately removes its contribution. Retrain after changing exclusions to refit the starting score and remaining weights. Overrides survive retraining. Blank an override to return to its learned weight.
 
-Tags that co-occur are hard to separate. Rare tags, selective rating habits, inconsistent tagging, and factors absent from tags limit accuracy. Example counts are evidence indicators, not calibrated confidence probabilities. There are no performers/studios, text embeddings, interactions, or external AI calls in this version.
+Tags that co-occur are hard to separate. Rare tags, selective rating habits, inconsistent tagging, and factors absent from tags limit accuracy. Example counts are evidence indicators, not calibrated confidence probabilities. There are no text embeddings, feature interactions, activity inputs, or external AI calls in this version.
 
 ## Updates and storage
 
@@ -100,7 +112,7 @@ The dashboard fetches scene metadata in batches of 500 and holds it in browser m
 - `npm test` — regression, validation, prediction, storage validation, and safety tests.
 - `npm run build` — creates the installable ZIP and Stash source index in `_site/main`.
 
-For browser integration, launch a **separate disposable Stash** on `127.0.0.1:19998` with this repository's `plugins` directory. Run `python3 tests/seed-demo.py` once on its empty library, then `node tests/browser.cjs` , `node tests/review-browser.cjs`, and `node tests/recalibration-browser.cjs` (Chrome required). The script checks learning, server persistence, manual weights, scene integration, ignored tags, responsive layout, and absence of scene-rating writes. All screenshots and test data belong in ignored `.test-runtime/`.
+For browser integration, launch a **separate disposable Stash** on `127.0.0.1:19998` with this repository's `plugins` directory. Run `python3 tests/seed-demo.py` once on its empty library, then `node tests/browser.cjs` , `node tests/review-browser.cjs`, `node tests/recalibration-browser.cjs`, and `node tests/inputs-browser.cjs` (Chrome required). The script checks learning, server persistence, manual weights, scene integration, ignored tags, responsive layout, and absence of scene-rating writes. All screenshots and test data belong in ignored `.test-runtime/`.
 
 License: AGPL-3.0; see LICENCE.
 

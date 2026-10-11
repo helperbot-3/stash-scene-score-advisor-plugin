@@ -7,7 +7,7 @@
   const ID='scene-score-advisor';
   const CONFIG=gql`query AdvisorConfig { configuration { plugins(include:["scene-score-advisor"]) } }`;
   const SAVE=gql`mutation AdvisorSave($input:Map!) { configurePlugin(plugin_id:"scene-score-advisor",input:$input) }`;
-  const SCENES=gql`query AdvisorScenes($page:Int!) { findScenes(filter:{page:$page,per_page:500,sort:"id",direction:ASC}) { count scenes { id title rating100 tags { id name } } } }`;
+  const SCENES=gql`query AdvisorScenes($page:Int!) { findScenes(filter:{page:$page,per_page:500,sort:"id",direction:ASC}) { count scenes { id title rating100 tags { id name } performers { id name } studio { id name } } } }`;
   const empty=()=>({version:1,model:null,rules:{},metaIds:[],history:[]});
   const PLUGINS=gql`query AdvisorPlugins { plugins { id enabled } }`;
   const META=gql`mutation AdvisorReadMeta { runPluginOperation(plugin_id:"marker-compilations",args:{action:"screening_list"}) }`;
@@ -116,6 +116,23 @@
           h('tbody',null,preview.changes.slice(0,20).map(t=>h('tr',{key:t.id},h('td',null,t.name),h('td',null,delta(t.before)),h('td',null,delta(t.after))))))),
       h('div',{className:'ssa-actions'},button('Apply recalibration',onApply,busy,{className:'ssa-primary'}),button('Keep current model',onCancel,busy)));
   }
+  function InputComparison({comparison,busy,onApply,onCancel}) {
+    const [selected,setSelected]=useState(comparison.best);
+    const chosen=comparison.candidates[selected];
+    return h('section',{className:'ssa-review-card','aria-label':'Prediction input comparison'},
+      h('h2',null,'Compare prediction inputs'),
+      h('p',null,'All four options relearn label strengths using your corrections, locks and exclusions. Performer and studio inputs are optional.'),
+      h('div',{className:'ssa-table-wrap'},h('table',null,
+        h('thead',null,h('tr',null,['Choose','Prediction inputs','Error in stars ↓','Entity weights','Scenes at 5.0'].map(s=>h('th',{key:s},s)))),
+        h('tbody',null,comparison.candidates.map((c,i)=>h('tr',{key:c.name},
+          h('td',null,h('input',{type:'radio',name:'prediction-inputs','aria-label':c.name,checked:selected===i,disabled:busy,onChange:()=>setSelected(i)})),
+          h('td',null,c.name,i===comparison.best&&h('small',null,' · best in this check')),
+          h('td',null,(c.error/20).toFixed(3)),h('td',null,c.entityCount),h('td',null,c.summary.top)))))),
+      h('p',{className:chosen.improved?'ssa-muted':'ssa-notice'},selected===0?'Choose labels alone to keep or return to tag-based predictions.':chosen.improved?'This option improved on labels alone in this check.':'This option did not improve on labels alone, so applying it is disabled.'),
+      h('p',{className:'ssa-muted'},'Same ',comparison.count,' held-out scenes for every option; lower error is better. This is a model-selection check, not an independent final accuracy estimate. Your prior label judgments may also reflect these scenes. Five-star counts use the whole loaded library.'),
+      h('p',null,'Unseen or rare performers and studios contribute zero. They never lower a score simply because their data is missing. Five rated examples are required to learn an entity weight.'),
+      h('div',{className:'ssa-actions'},button('Apply selected model',()=>onApply(chosen),busy||!chosen.improved,{className:'ssa-primary'}),button('Cancel comparison',onCancel,busy)));
+  }
   function TagRule({tag,learned,rule,onChange,disabled}) {
     const [value,setValue]=useState(rule.weight==null?'':String(rule.weight/20));
     useEffect(()=>setValue(rule.weight==null?'':String(rule.weight/20)),[rule.weight]);
@@ -139,8 +156,8 @@
     const [state,setState]=useState(empty),[scenes,setScenes]=useState([]),[ready,setReady]=useState(false);
     const [busy,setBusy]=useState('Loading library…'),[error,setError]=useState(''),[dirty,setDirty]=useState(false);
     const [tab,setTab]=useState('scenes'),[search,setSearch]=useState(''),[unrated,setUnrated]=useState(true),[page,setPage]=useState(1);
-    const [preview,setPreview]=useState(null);
-    useEffect(()=>setPreview(null),[state,scenes]);
+    const [preview,setPreview]=useState(null),[comparison,setComparison]=useState(null);
+    useEffect(()=>{setPreview(null);setComparison(null);},[state,scenes]);
     const [sort,setSort]=useState('score'),[metaWarning,setMetaWarning]=useState('');
     async function refresh() {
       setBusy('Loading library…');setError('');
@@ -174,8 +191,16 @@
       }catch(e){setError(e.message);}finally{setBusy('');}
     }
     async function previewCalibration() {
-      setBusy('Recalibrating label strengths and checking predictions…');setError('');setPreview(null);
+      setBusy('Recalibrating label strengths and checking predictions…');setError('');setPreview(null);setComparison(null);
       try{setPreview(await M.recalibrate(scenes,state));}catch(e){setError(e.message);}finally{setBusy('');}
+    }
+    async function comparePredictionInputs() {
+      setBusy('Comparing labels, performers and studios on the same held-out scenes…');setError('');setPreview(null);setComparison(null);
+      try{setComparison(await M.compareInputs(scenes,state));}catch(e){setError(e.message);}finally{setBusy('');}
+    }
+    async function applyInputModel(candidate) {
+      if(!candidate.improved)return;
+      await save({...state,model:candidate.model,rules:candidate.rules,history:[],recalibrationUndo:{model:state.model,rules:state.rules,history:state.history||[]}});
     }
     async function applyCalibration() {
       if(!preview)return;
@@ -205,7 +230,7 @@
     function rule(id,value){setState(s=>({...s,rules:{...s.rules,[id]:value}}));setDirty(true);}
     const tags=useMemo(()=>M.catalog(scenes,state.metaIds),[scenes,state.metaIds]);
     const ratedCount=useMemo(()=>scenes.filter(M.rated).length,[scenes]);
-    const fingerprint=useMemo(()=>M.fingerprint(scenes),[scenes]);
+    const fingerprint=useMemo(()=>M.fingerprint(scenes,state.model?.inputs),[scenes,state.model?.inputs]);
     const weights=new Map((state.model?.tags||[]).map(t=>[t.id,t]));
     const results=useMemo(()=>{const predict=M.createPredictor(state.model,M.effectiveRules(state));return scenes.map(scene=>({scene,result:predict(scene)}));},[scenes,state]);
     const filtered=useMemo(()=>{
@@ -220,12 +245,12 @@
     const outdated=state.model && (state.model.exclusionRevision!==2 || state.model.fingerprint!==fingerprint || JSON.stringify(ignored)!==JSON.stringify(state.model.ignored));
     return h('main',{className:'ssa'},
       h('header',{className:'ssa-header'},h('div',null,h('span',{className:'ssa-eyebrow'},'YOUR LIBRARY · YOUR TASTE'),h('h1',null,'Scene Score Advisor'),h('p',null,'Discover what your tags suggest. Your own ratings stay yours.')),
-        h('div',{className:'ssa-actions'},button('Reload library',refresh,!!busy||dirty),button('Learn from my ratings',learn,!!busy||!ready||ratedCount<10,{className:'ssa-primary'}),button('Recalibrate from my ratings',previewCalibration,!!busy||!state.model||ratedCount<20),state.recalibrationUndo&&button('Undo recalibration',undoCalibration,!!busy||dirty),dirty&&button('Save changes',()=>save(),!!busy))),
+        h('div',{className:'ssa-actions'},button('Reload library',refresh,!!busy||dirty),button('Learn from my ratings',learn,!!busy||!ready||ratedCount<10,{className:'ssa-primary'}),button('Recalibrate from my ratings',previewCalibration,!!busy||!state.model||ratedCount<20),button('Compare prediction inputs',comparePredictionInputs,!!busy||!state.model||ratedCount<20),state.recalibrationUndo&&button('Undo recalibration',undoCalibration,!!busy||dirty),dirty&&button('Save changes',()=>save(),!!busy))),
       metaWarning&&h('p',{className:'ssa-notice'},metaWarning),
       error&&h('p',{role:'alert',className:'ssa-error'},error),
       busy&&h('p',{role:'status'},busy),
       dirty&&h('p',{role:'status'},'Unsaved changes. Suggestions below preview these adjustments.'),
-      outdated&&h('p',{className:'ssa-notice'},'Ratings, tags, or exclusions have changed since training. Learn again to update the model.'),
+      outdated&&h('p',{className:'ssa-notice'},'Ratings, prediction inputs, or exclusions have changed since training. Learn again to update the model.'),
       h('section',{className:'ssa-stats','aria-label':'Model summary'},
         h('div',null,h('strong',null,ratedCount.toLocaleString()),h('span',null,'rated scenes available')),
         h('div',null,h('strong',null,state.model?stars(state.model.baseline):'—'),h('span',null,'starting score / 5')),
@@ -233,9 +258,12 @@
         h('div',null,h('strong',null,validation?stars(validation.mae):'—'),h('span',null,'held-out error in stars'))),
       !state.model&&h('section',{className:'ssa-notice'},h('h2',null,'Start with the ratings you already trust'),h('p',null,ratedCount<10?'Rate at least 10 scenes to start learning. At 20 rated scenes, the advisor can also test its predictions.':'Review the Tag weights tab for rating-derived tags, then choose “Learn from my ratings”.'),h('p',null,'Weights are learned from scene tags only. Rare tags need at least 3 rated examples.')),
       state.model&&h('p',{className:'ssa-muted'},M.scoreSummary(scenes,state.model,M.effectiveRules(state)).top,' of ',scenes.length,' scenes display 5.0 / 5. Recalibration requires at least 20 rated scenes.'),
+      state.model&&h('p',{className:'ssa-muted'},'Active inputs: ',M.inputName(state.model.inputs),' · ',state.model.entities?.length||0,' learned performer/studio weights.'),
+      state.model?.entities?.length>0&&h('details',null,h('summary',null,'Performer and studio effects · largest 50'),h('div',{className:'ssa-table-wrap'},h('table',null,h('thead',null,h('tr',null,h('th',null,'Entity'),h('th',null,'Rated examples'),h('th',null,'Effect in stars'))),h('tbody',null,state.model.entities.slice().sort((a,b)=>Math.abs(b.weight)-Math.abs(a.weight)).slice(0,50).map(t=>h('tr',{key:t.id},h('td',null,t.name),h('td',null,t.count),h('td',null,delta(t.weight)))))))),
+      comparison&&h(InputComparison,{comparison,busy:!!busy,onApply:applyInputModel,onCancel:()=>setComparison(null)}),
       preview&&h(CalibrationPreview,{preview,busy:!!busy,onApply:applyCalibration,onCancel:()=>setPreview(null)}),
       state.model&&h('section',{className:'ssa-validation'},h('p',null,'Learned from ',state.model.ratedCount,' rated scenes · ',new Date(state.model.trainedAt).toLocaleString()),
-        validation?h('p',null,'Held-out check on ',validation.count,' scenes: average error ',stars(validation.mae),' stars; predicting your average rating: ',stars(validation.baselineMae),' stars. ',validation.mae<validation.baselineMae?'Tags improved this check.':'Tags did not improve this check; treat suggestions cautiously.',state.model.guided?' This check includes guided corrections.':' This check evaluates learned weights before manual adjustments.'):h('p',null,'Not enough rated scenes for a held-out check (20 required).')),
+        validation?h('p',null,'Held-out check on ',validation.count,' scenes: average error ',stars(validation.mae),' stars; predicting your average rating: ',stars(validation.baselineMae),' stars. ',validation.mae<validation.baselineMae?'The model improved this check.':'The model did not improve this check; treat suggestions cautiously.',state.model.guided?' This check includes guided corrections.':' This check evaluates learned weights before manual adjustments.'):h('p',null,'Not enough rated scenes for a held-out check (20 required).')),
       h('div',{className:'ssa-toolbar'},h('div',{className:'ssa-tabs'},['scenes','review','tags'].map(key=>button(key==='scenes'?'Scene suggestions':key==='review'?'Review labels':'Tag weights',()=>{setTab(key);setSearch('');setPage(1);},false,{'aria-pressed':tab===key,key}))),
         h('input',{type:'search','aria-label':tab==='scenes'?'Search scenes':'Search tags',placeholder:tab==='scenes'?'Search scenes…':'Search tags…',value:search,onChange:e=>{setSearch(e.target.value);setPage(1);}}),
         tab==='scenes'&&h('label',null,h('input',{type:'checkbox',checked:unrated,onChange:e=>{setUnrated(e.target.checked);setPage(1);}}),' Unrated only'),
